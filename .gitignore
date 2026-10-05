@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+dist/
+build/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Runtime data (never commit media, models, DB files)
+storage/
+models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.sqlite3
+*.log
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
