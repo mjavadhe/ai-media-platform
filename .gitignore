@@ -36,3 +36,13 @@ models/
 .idea/
 .vscode/
 .DS_Store
+.venv/
+var/
+node_modules/
+dist/
+.coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.log
+.env
