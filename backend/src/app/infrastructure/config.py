@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "development"
     debug: bool = False
     api_prefix: str = "/api/v1"
+    api_host: str = "0.0.0.0"  # noqa: S104 - containers bind all interfaces
+    api_port: int = 8000
 
     # --- Database --------------------------------------------------------
     database_url: str = Field(
@@ -79,7 +81,16 @@ class Settings(BaseSettings):
     scheduler_loop_interval_seconds: float = 1.0
     scheduler_lease_advisory_key: int = 918_273_645
     scheduler_reconcile_interval_seconds: float = 5.0
+    scheduler_batch_size: int = Field(
+        default=10,
+        description="Max jobs reserved per Scheduler iteration (bounds lock hold time).",
+    )
     scheduler_release_pending_grace_seconds: float = 2.0
+    #: Orchestrator sweeper cadence (due retries + pending cancellations). Kept
+    #: separate from the Scheduler interval because they own different
+    #: transitions and must be able to run in different processes.
+    orchestrator_enabled: bool = True
+    orchestrator_loop_interval_seconds: float = 2.0
 
     # --- Job / queue / lease --------------------------------------------
     job_max_retries: int = 3

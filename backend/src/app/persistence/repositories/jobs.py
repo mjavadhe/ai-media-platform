@@ -209,6 +209,43 @@ class JobRepository:
         return job
 
     # --- queue (API enqueue / Orchestrator requeue) ---------------------
+    async def set_priority(self, job: Job, *, priority: str, priority_rank: int) -> Job:
+        """Reweight a queued job.
+
+        Only permitted while the job has not been claimed: once a GPU is
+        reserved, changing the weight would silently reorder work that is
+        already committed to a device.
+        """
+        if JobStatus(job.status) not in {JobStatus.CREATED, JobStatus.QUEUED, JobStatus.RETRYING}:
+            raise InvalidTransitionError(
+                JobStatus(job.status), JobStatus(job.status), reason="job is already claimed"
+            )
+        job.priority = priority
+        job.priority_rank = priority_rank
+        await self._session.flush()
+        await append_job_event(
+            self._session, job, event_type="job.priority_changed", payload={"priority": priority}
+        )
+        return job
+
+    async def pause(self, job: Job, *, reason: str | None = None) -> Job:
+        """RUNNING -> PAUSED (Orchestrator). The lease and GPU stay held."""
+        JobStateMachine.validate(
+            JobStatus(job.status), JobStatus.PAUSED, JobOwner.ORCHESTRATOR
+        )
+        job.status = JobStatus.PAUSED.value
+        job.progress_message = reason or job.progress_message
+        await self._session.flush()
+        await append_job_event(
+            self._session, job, event_type="job.paused", payload={"reason": reason}
+        )
+        return job
+
+    async def resume(self, job: Job, *, visible_at: datetime | None = None) -> Job:
+        """PAUSED -> QUEUED (Orchestrator resume)."""
+        JobStateMachine.validate(JobStatus(job.status), JobStatus.QUEUED, JobOwner.ORCHESTRATOR)
+        return await self.enqueue(job, owner=JobOwner.ORCHESTRATOR, visible_at=visible_at)
+
     async def enqueue(
         self,
         job: Job,
@@ -755,6 +792,15 @@ class JobRepository:
         )
         return bool(result.rowcount)
 
+    async def get_by_claim_id(self, claim_id: str) -> Job | None:
+        """Resolve a job from an opaque ``claim_id`` (worker-facing lookups)."""
+        row = await self._session.scalar(
+            select(JobClaim.job_id).where(
+                JobClaim.claim_id == claim_id, JobClaim.released_at.is_(None)
+            )
+        )
+        return await self.get(row) if row is not None else None
+
     async def get_live_claim(self, job_id: uuid.UUID) -> JobClaim | None:
         return await self._session.scalar(
             select(JobClaim)
@@ -800,6 +846,24 @@ class JobRepository:
             select(JobClaim)
             .where(JobClaim.released_at.is_(None), JobClaim.expires_at <= utcnow())
             .order_by(JobClaim.expires_at)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        return list(rows.all())
+
+    async def find_due_retries(self, *, limit: int = 100) -> list[Job]:
+        """``RETRYING`` jobs whose backoff delay has elapsed (Orchestrator sweep).
+
+        ``skip_locked`` lets several sweeper iterations overlap safely.
+        """
+        rows = await self._session.scalars(
+            select(Job)
+            .where(
+                Job.status == JobStatus.RETRYING.value,
+                Job.visible_at.isnot(None),
+                Job.visible_at <= utcnow(),
+            )
+            .order_by(Job.visible_at)
             .limit(limit)
             .with_for_update(skip_locked=True)
         )

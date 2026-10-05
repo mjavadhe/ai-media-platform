@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.enums import GpuStatus, NodeStatus, ReservationState
@@ -40,6 +40,14 @@ class ReservationConflictError(Exception):
     Raised in the normal path when a second actor races the Scheduler; callers
     treat it as "someone else already did this" rather than as a fatal error.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class DevicePage:
+    """A page of devices plus the unpaginated total."""
+
+    items: list[GpuDevice]
+    total: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +115,7 @@ class GpuRepository:
         device_uuid: str,
         index: int,
         name: str,
+        backend_device_id: str | None = None,
         vram_total_mb: int,
         vram_free_mb: int,
         compute_capability: str | None = None,
@@ -137,6 +146,8 @@ class GpuRepository:
             )
             self._session.add(device)
         device.name = name
+        if backend_device_id:
+            device.backend_device_id = backend_device_id
         device.vram_total_mb = vram_total_mb
         device.vram_free_mb = vram_free_mb
         device.compute_capability = compute_capability
@@ -464,6 +475,28 @@ class GpuRepository:
         await self._session.flush()
         return True
 
+    async def complete_release_for_job(self, job_id: uuid.UUID) -> bool:
+        """Complete Tx2 for whatever live reservation a job still holds.
+
+        Used by the Scheduler's *recovery* paths, where the Scheduler is the actor
+        that detected the problem, so it may finish the release itself instead of
+        leaving a ``RELEASE_PENDING`` request for the reconciler. Returns False
+        when the job holds no live reservation (already released).
+        """
+        reservation = await self.get_reservation_for_job(job_id, lock=True)
+        if reservation is None:
+            return False
+        # Recovery is the detecting actor, so it may skip the wait for Tx1's
+        # handshake — but the state must still move through RELEASE_PENDING,
+        # otherwise `complete_release` (correctly) refuses to free a live
+        # reservation. The row is already locked, so this cannot race Tx1.
+        if reservation.state == ReservationState.RELEASE_PENDING.value:
+            return await self.complete_release(reservation.id)
+        reservation.state = ReservationState.RELEASE_PENDING.value
+        reservation.release_requested_at = utcnow()
+        await self._session.flush()
+        return await self.complete_release(reservation.id)
+
     async def get_pending_releases(
         self, *, older_than_seconds: float = 0.0, limit: int = 200
     ) -> list[GpuReservation]:
@@ -486,14 +519,58 @@ class GpuRepository:
         )
         return list(rows.all())
 
-    async def list_devices(self, *, status: str | None = None) -> list[GpuDevice]:
-        stmt = select(GpuDevice).order_by(GpuDevice.node_id, GpuDevice.index)
+    async def list_devices(
+        self,
+        *,
+        node_id: uuid.UUID | None = None,
+        status: str | None = None,
+        health: str | None = None,
+        min_free_vram_mb: int | None = None,
+        capability: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> DevicePage:
+        """Filtered device inventory.
+
+        The same predicate set backs the API's ``GET /gpus/devices``, the
+        operations UI and (partly) placement, so filtering is expressed once here
+        instead of being re-derived per caller. ``capability`` filters on the
+        data-driven capability rows, never on a device name.
+        """
+        stmt = select(GpuDevice)
+        if node_id is not None:
+            stmt = stmt.where(GpuDevice.node_id == node_id)
         if status:
             stmt = stmt.where(GpuDevice.status == status)
-        return list((await self._session.scalars(stmt)).all())
+        if health:
+            stmt = stmt.where(GpuDevice.health == health)
+        if min_free_vram_mb is not None:
+            stmt = stmt.where(GpuDevice.vram_free_mb >= min_free_vram_mb)
+        if capability:
+            stmt = stmt.where(
+                GpuDevice.id.in_(
+                    select(GpuCapability.device_id).where(GpuCapability.name == capability)
+                )
+            )
+        total = await self._session.scalar(select(func.count()).select_from(stmt.subquery()))
+        stmt = stmt.order_by(GpuDevice.node_id, GpuDevice.index)
+        if limit is not None:
+            stmt = stmt.limit(limit).offset(offset)
+        rows = await self._session.scalars(stmt)
+        return DevicePage(items=list(rows.all()), total=int(total or 0))
 
     async def list_nodes(self) -> list[GpuNode]:
         return list((await self._session.scalars(select(GpuNode).order_by(GpuNode.name))).all())
+
+    async def list_reservations(
+        self, *, state: str | None = None, limit: int = 100
+    ) -> list[GpuReservation]:
+        """Reservations for the operations view, newest first."""
+        stmt = select(GpuReservation)
+        if state:
+            stmt = stmt.where(GpuReservation.state == state)
+        stmt = stmt.order_by(GpuReservation.created_at.desc()).limit(limit)
+        return list((await self._session.scalars(stmt)).all())
 
     async def get_reservation_for_job(
         self, job_id: uuid.UUID, *, lock: bool = False

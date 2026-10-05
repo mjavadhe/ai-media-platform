@@ -49,7 +49,10 @@ LEGAL_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.PAUSED: frozenset({JobStatus.QUEUED, JobStatus.CANCELLED}),
     JobStatus.RETRYING: frozenset({JobStatus.QUEUED, JobStatus.FAILED, JobStatus.CANCELLED}),
     JobStatus.COMPLETED: frozenset(),
-    JobStatus.FAILED: frozenset(),
+    # FAILED is terminal for automatic retries, but the API may re-open it:
+    # contract section "API surface" requires POST /jobs/{id}/retry to perform
+    # FAILED->QUEUED with a fresh attempt. Nothing else may leave FAILED.
+    JobStatus.FAILED: frozenset({JobStatus.QUEUED}),
     JobStatus.CANCELLED: frozenset(),
 }
 
@@ -85,6 +88,9 @@ TRANSITION_OWNERS: dict[tuple[JobStatus, JobStatus], frozenset[JobOwner]] = {
     # orchestrator retry scheduling
     (JobStatus.RETRYING, JobStatus.QUEUED): frozenset({JobOwner.ORCHESTRATOR}),
     (JobStatus.RETRYING, JobStatus.FAILED): frozenset({JobOwner.ORCHESTRATOR}),
+    # manual re-queue by a user (POST /jobs/{id}/retry); the Orchestrator
+    # executes the retry budget reset, the API is the only permitted actor
+    (JobStatus.FAILED, JobStatus.QUEUED): frozenset({JobOwner.API}),
     # scheduler-detected recovery paths
     (JobStatus.RESERVED, JobStatus.QUEUED): frozenset({JobOwner.SCHEDULER}),
     (JobStatus.STARTING, JobStatus.QUEUED): frozenset({JobOwner.SCHEDULER}),

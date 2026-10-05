@@ -37,6 +37,7 @@ dev = [
 [project.scripts]
 app-api = "app.main:run"
 app-scheduler = "app.scheduler.runner:run"
+app-orchestrator = "app.orchestrator.runner:run"
 app-worker = "worker.agent:run"
 
 [build-system]

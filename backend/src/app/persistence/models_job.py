@@ -76,6 +76,10 @@ class GpuDevice(Base, TimestampMixin):
     uuid: Mapped[str] = mapped_column(String(64), nullable=False)
     index: Mapped[int] = mapped_column(Integer, nullable=False)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: opaque, backend-specific handle used for telemetry/probe/execute calls.
+    #: Mock: ``mock-node-0-gpu-0``; NVML: the CUDA index as a string. Stored so
+    #: telemetry lookups never have to guess from the device name or index.
+    backend_device_id: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(
         String(16), default=GpuStatus.AVAILABLE.value, nullable=False
     )
@@ -102,6 +106,9 @@ class GpuDevice(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("uuid", name="uq_gpu_devices_uuid"),
         UniqueConstraint("node_id", "index", name="uq_gpu_devices_node_index"),
+        UniqueConstraint(
+            "node_id", "backend_device_id", name="uq_gpu_devices_node_backend_device"
+        ),
         Index("ix_gpu_devices_status", "status"),
         Index("ix_gpu_devices_node_id", "node_id"),
         Index("ix_gpu_devices_reservation_id", "reservation_id"),
