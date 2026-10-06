@@ -65,6 +65,7 @@ async def list_workflows(
                 model_keys=list(workflow.model_keys),
                 required_capabilities=list(workflow.required_capabilities),
                 min_vram_mb=workflow.min_vram_mb,
+                node_count=workflow.node_count(),
                 source=workflow.source,
             )
             for workflow in registry.list_workflows()

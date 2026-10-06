@@ -37,9 +37,11 @@ dev = [
 [project.scripts]
 app-api = "app.main:run"
 app-scheduler = "app.scheduler.runner:run"
-app-orchestrator = "app.orchestrator.runner:run"
+# Console scripts must call a synchronous entry point; pointing these at the
+# async ``run()`` coroutines returned it un-awaited and the process exited.
+app-orchestrator = "app.orchestrator.runner:main"
 app-bootstrap = "app.bootstrap:main"
-app-worker = "worker.agent:run"
+app-worker = "worker.agent:main"
 
 [build-system]
 requires = ["hatchling"]

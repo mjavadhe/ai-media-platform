@@ -185,7 +185,9 @@ class ApiClient:
                 "capabilities": capabilities,
                 "node_key": node_key,
             },
-            headers=self._headers(),
+            # Registration is authenticated by the one-time token, not by a
+            # worker credential; the API rejects the call without this header.
+            headers={**self._headers(), "X-Registration-Token": registration_token},
         )
         payload = response.json()
         self._credential = payload["credential"]

@@ -15,10 +15,11 @@ import uuid
 from fastapi import APIRouter, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.deps import DbSession, require_permissions
+from app.api.deps import require_permissions
 from app.domain.enums import PermissionCode
 from app.infrastructure.events import Event, get_event_bus
 from app.infrastructure.logging import get_logger
+from app.persistence.database import session_scope
 from app.persistence.repositories.jobs import JobRepository
 
 logger = get_logger(__name__)
@@ -38,7 +39,6 @@ STREAM_ALIASES = ("jobs", "logs", "gpus", "nodes")
 @router.get("/stream/jobs")
 async def stream_events(
     request: Request,
-    session: DbSession,
     principal: require_permissions(PermissionCode.JOB_READ.value),
     job_id: uuid.UUID | None = None,
     replay_from_seq: int = Query(default=0, ge=0),
@@ -48,12 +48,20 @@ async def stream_events(
     Durable rows are replayed first so a reconnect can never leave a gap.
     """
     bus = get_event_bus()
-    repo = JobRepository(session)
 
     async def replay():
+        # Deliberately opens its own short-lived session: this endpoint used to
+        # depend on a request-scoped DbSession, which FastAPI keeps open for the
+        # whole (potentially hours-long) stream. Each open SSE connection then
+        # pinned a pooled DB connection until the client disconnected, and a
+        # handful of streams exhausted the pool and 503'd every other request.
         if not replay_from_seq or job_id is None:
             return
-        for row in await repo.list_events(job_id, after_seq=replay_from_seq, limit=500):
+        async with session_scope() as replay_session:
+            rows = await JobRepository(replay_session).list_events(
+                job_id, after_seq=replay_from_seq, limit=500
+            )
+        for row in rows:
             event = Event(
                 event_type=row.event_type,
                 job_id=row.job_id,
@@ -99,6 +107,20 @@ async def stream_events(
         stream(),
         ping=15,
         headers={"cache-control": "no-cache", "x-accel-buffering": "no"},
+    )
+
+
+# The contract lists /stream/jobs, /stream/logs, /stream/gpus and
+# /stream/nodes. All four are the same bus with a different default filter, so
+# they are registered from one handler instead of being duplicated four times.
+for _alias in STREAM_ALIASES:
+    if _alias == "jobs":  # already bound by the decorator above
+        continue
+    router.add_api_route(
+        f"/stream/{_alias}",
+        stream_events,
+        methods=["GET"],
+        include_in_schema=True,
     )
 
 

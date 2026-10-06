@@ -62,7 +62,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Fail fast and loudly: a misconfigured storage root must not surface later
     # as a mysterious 500 on the first completed job.
     storage_info = await storage.health()
-    if not storage_info.get("writable"):
+    # ``StorageBackend.health()`` reports its verdict under "ok"; checking any
+    # other key made a healthy backend log a spurious error on every boot.
+    if not storage_info.get("ok"):
         logger.error("storage.unwritable", **storage_info)
     registry = get_registry()
     logger.info(

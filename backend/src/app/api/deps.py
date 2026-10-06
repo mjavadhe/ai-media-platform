@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.config import Settings
 from app.infrastructure.security import constant_time_equals
-from app.persistence.database import get_db
+from app.persistence.database import get_db, session_scope
 from app.persistence.models_identity import Worker
 from app.persistence.repositories.users import (
     AuthenticationError,
@@ -70,7 +70,6 @@ RegistryDep = Annotated[ModelRegistry, Depends(get_model_registry)]
 
 
 async def get_current_principal(
-    session: DbSession,
     request: Request,
     settings: AppSettings,
     authorization: Annotated[str | None, Header()] = None,
@@ -80,8 +79,14 @@ async def get_current_principal(
     The cookie name is configuration, never a literal, and how the caller
     authenticated is recorded on ``request.state`` so :func:`require_csrf` can
     demand a CSRF proof from cookie-authenticated browsers only.
+
+    The session is opened and closed *inside* this dependency rather than being
+    declared as a request-scoped ``DbSession``. A request-scoped session is
+    held open until the whole response is produced, so on a long-lived SSE
+    stream every subscriber would pin a pooled connection for the life of the
+    connection and exhaust the pool after a handful of dashboards. Endpoints
+    that only need the identity (streams) therefore never hold one open.
     """
-    repo = UserRepository(session)
     via_cookie = False
     token: str | None = None
     if authorization and authorization.lower().startswith("bearer "):
@@ -97,10 +102,12 @@ async def get_current_principal(
             headers={"WWW-Authenticate": "Bearer"},
         )
     try:
-        if via_cookie:
-            principal = await repo.resolve_session(token)
-        else:
-            principal = await repo.resolve_api_token(token)
+        async with session_scope() as lookup_session:
+            repo = UserRepository(lookup_session)
+            principal = await (
+                repo.resolve_session(token) if via_cookie else repo.resolve_api_token(token)
+            )
+            await lookup_session.commit()
     except AuthenticationError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
     request.state.user_id = principal.user.id

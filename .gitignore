@@ -46,3 +46,7 @@ dist/
 .mypy_cache/
 *.log
 .env
+
+# Worker runtime state. credential.json holds a hashed-opaque worker
+# credential; it must never be committed.
+.var/

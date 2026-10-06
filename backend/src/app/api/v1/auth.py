@@ -82,6 +82,11 @@ async def login(
         max_age=settings.access_token_ttl_minutes * 60,
         path="/",
     )
+    # Commit before returning. FastAPI runs ``yield``-dependency teardown after
+    # the response is sent, so relying on it left the session row uncommitted
+    # while the browser was already issuing its first /auth/me, which then
+    # reported "unknown session" and bounced the user back to the login page.
+    await session.commit()
     logger.info("auth.login", username=user.username, ip=client_ip)
     return LoginResponse(
         csrf_token=csrf,

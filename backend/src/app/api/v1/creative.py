@@ -85,7 +85,8 @@ async def create_project(
         description=payload.description,
         status="ACTIVE",
         created_by=principal.user.id,
-        extra=payload.metadata_,
+        # The ORM attribute is ``metadata_``; ``extra`` is not a valid kwarg.
+        metadata_=payload.metadata_ or {},
     )
     session.add(project)
     await session.flush()
@@ -377,15 +378,29 @@ async def list_media_versions(
         .where(GeneratedMediaVersion.media_id == media_id)
         .order_by(GeneratedMediaVersion.version_no)
     )
+    versions = list(rows.all())
+    # Key, mime type, size and checksum live on the StorageObject, reached via
+    # the version's FK; the version row carries none of them.
+    objects = {
+        obj.id: obj
+        for obj in (
+            await session.scalars(
+                select(StorageObject).where(
+                    StorageObject.id.in_([v.storage_object_id for v in versions])
+                )
+            )
+        ).all()
+    } if versions else {}
     return [
         MediaVersionOut(
             version_no=version.version_no,
-            storage_key=version.storage_key,
-            mime_type=version.mime_type,
-            size_bytes=version.size_bytes,
-            checksum=version.checksum,
+            storage_key=objects[version.storage_object_id].key,
+            mime_type=objects[version.storage_object_id].mime_type,
+            size_bytes=objects[version.storage_object_id].size_bytes,
+            checksum=objects[version.storage_object_id].checksum,
         )
-        for version in rows.all()
+        for version in versions
+        if version.storage_object_id in objects
     ]
 
 
@@ -413,20 +428,23 @@ async def download_current(
     )
     if version is None:
         raise HTTPException(status_code=404, detail="media has no current version")
-    object_row = await session.scalar(
-        select(StorageObject).where(StorageObject.key == version.storage_key)
-    )
+    # A version points at a StorageObject row via ``storage_object_id``; the
+    # object holds the storage key and the checksum (there is no
+    # ``version.storage_key``, which made this endpoint raise AttributeError).
+    object_row = await session.get(StorageObject, version.storage_object_id)
     if object_row is None:
         raise HTTPException(status_code=404, detail="storage object missing for this version")
-    if not storage.exists(version.storage_key):
+    # ``exists`` is a coroutine; calling it without await silently skipped the
+    # existence check and always passed.
+    if not await storage.exists(object_row.key):
         raise HTTPException(status_code=410, detail="artifact bytes are no longer stored")
-    data = await storage.read(version.storage_key)
+    data = await storage.read(object_row.key)
     return Response(
         content=data,
-        media_type=version.mime_type or "application/octet-stream",
+        media_type=object_row.mime_type or "application/octet-stream",
         headers={
             "content-length": str(len(data)),
-            "x-checksum-sha256": object_row.checksum_sha256 or "",
+            "x-checksum-sha256": object_row.checksum or "",
             "x-version-no": str(version.version_no),
         },
     )

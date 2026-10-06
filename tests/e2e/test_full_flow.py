@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 
 from app.domain.enums import GpuStatus, JobStatus, ReservationState
@@ -570,3 +570,155 @@ async def test_progress_and_event_trail_are_recorded(harness: Harness) -> None:
     ]
     assert percents, "expected progress events"
     assert percents == sorted(percents), "progress must never go backwards"
+
+
+# ---------------------------------------------------------------------------
+# Read endpoints the operator UI depends on.
+#
+# These are plain GETs, but they are the contract the React client codes
+# against: an unwrapped list vs {"items": [...]} vs {"items", "total"} is a
+# silent client bug, and a missing field in a registry-derived response is a
+# 400 for every caller.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("path", "envelope"),
+    [
+        ("/api/v1/jobs?limit=5", "items+total"),
+        ("/api/v1/workers?limit=10", "items+total"),
+        ("/api/v1/gpus?limit=500", "items+total"),
+        ("/api/v1/gpus/nodes", "items"),
+        ("/api/v1/models", "items"),
+        ("/api/v1/models/workflows", "items"),
+        ("/api/v1/projects", "bare-list"),
+        ("/api/v1/assets", "bare-list"),
+        ("/api/v1/metrics", "flat"),
+    ],
+)
+async def test_read_endpoints_match_the_response_shapes_the_ui_expects(
+    harness: Harness, path: str, envelope: str
+) -> None:
+    response = await harness.client.get(
+        path, headers={"Authorization": f"Bearer {harness.token}"}
+    )
+    assert response.status_code == 200, f"{path} -> {response.status_code}: {response.text}"
+    body = response.json()
+
+    if envelope == "bare-list":
+        assert isinstance(body, list), f"{path} must return a bare list"
+    elif envelope == "flat":
+        assert isinstance(body, dict) and "jobs_by_status" in body
+    else:
+        assert isinstance(body, dict), f"{path} must return an object"
+        assert isinstance(body["items"], list), f"{path} must expose items"
+        if envelope == "items+total":
+            assert isinstance(body["total"], int), f"{path} must expose total"
+
+
+async def test_workflow_specs_expose_node_count(harness: Harness) -> None:
+    """``node_count`` is derived from the graph; omitting it 400s the endpoint."""
+    response = await harness.client.get(
+        "/api/v1/models/workflows", headers={"Authorization": f"Bearer {harness.token}"}
+    )
+    assert response.status_code == 200, response.text
+    items = response.json()["items"]
+    assert items, "the built-in registry ships workflows"
+    for spec in items:
+        assert isinstance(spec["node_count"], int)
+        assert spec["node_count"] >= 0
+
+
+async def test_storage_health_reports_ok_not_writable(tmp_path: Path) -> None:
+    """``main.py`` gates startup on this key; a rename would break the check."""
+    from app.services.storage.local import LocalStorageBackend
+
+    info = await LocalStorageBackend(tmp_path).health()
+    assert "ok" in info, f"storage health must report 'ok', got {sorted(info)}"
+    assert info["ok"] is True, "a freshly created bucket must be writable"
+    assert "writable" not in info, "consumers must not depend on a 'writable' key"
+
+
+async def test_creating_a_project_persists_and_reports_it(harness: Harness) -> None:
+    """POST /projects must return 201; it previously raised TypeError (500).
+
+    Regression guard for the ``extra=`` / ``metadata_`` ORM kwarg mismatch and
+    for the alias that made ``ProjectOut`` read SQLAlchemy's Declarative
+    ``metadata`` object instead of the mapped column.
+    """
+    # Bearer auth is exempt from CSRF, so no CSRF header is needed here.
+    created = await harness.client.post(
+        "/api/v1/projects",
+        json={"name": "Contract Test Project", "description": "round trip"},
+        headers=harness.auth,
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert body["name"] == "Contract Test Project"
+    assert body["status"] == "ACTIVE"
+    assert isinstance(body["metadata"], dict)
+
+    listed = await harness.client.get("/api/v1/projects", headers=harness.auth)
+    assert listed.status_code == 200
+    assert any(p["id"] == body["id"] for p in listed.json())
+
+
+async def test_media_download_and_version_listing_stream_real_bytes(harness: Harness) -> None:
+    """The two media read endpoints resolve keys via the StorageObject FK.
+
+    Both previously raised ``AttributeError`` (``version.storage_key`` /
+    ``version.mime_type``) and returned HTTP 500 for every artifact.
+    """
+    created = await harness.create_job()
+    await harness.scheduler_cycle()
+    assert await harness.run_agent(jobs=1) == 1
+
+    from app.persistence.models_creative import GeneratedMedia
+
+    job_id = uuid.UUID(created["job_id"])
+    async with harness.session_factory() as session:
+        media = (
+            (
+                await session.execute(
+                    select(GeneratedMedia).where(GeneratedMedia.job_id == job_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert media, "expected a media row for the completed job"
+        media_id = media[0].id
+
+    versions = await harness.client.get(f"/api/v1/media/{media_id}/versions", headers=harness.auth)
+    assert versions.status_code == 200, versions.text
+    items = versions.json()
+    assert items and items[0]["storage_key"], "a version must expose its storage key"
+    assert items[0]["size_bytes"] > 0
+    assert items[0]["mime_type"]
+
+    download = await harness.client.get(f"/api/v1/media/{media_id}/current", headers=harness.auth)
+    assert download.status_code == 200, download.text
+    assert len(download.content) == items[0]["size_bytes"]
+    assert download.headers["x-checksum-sha256"] == items[0]["checksum"]
+
+    # A missing object must be 410, not a 500: this proves ``storage.exists``
+    # is actually awaited on the download path.
+    gone = uuid.uuid4()
+    async with harness.session_factory() as session:
+        from app.persistence.models_creative import StorageObject
+
+        key = items[0]["storage_key"]
+        obj = (
+            (await session.execute(select(StorageObject).where(StorageObject.key == key)))
+            .scalars()
+            .first()
+        )
+        assert obj is not None
+        await session.execute(
+            update(StorageObject)
+            .where(StorageObject.id == obj.id)
+            .values(key=f"missing/{gone}.bin")
+        )
+        await session.commit()
+    missing = await harness.client.get(f"/api/v1/media/{media_id}/current", headers=harness.auth)
+    assert missing.status_code == 410, f"expected 410, got {missing.status_code}"

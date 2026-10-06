@@ -72,7 +72,9 @@ class ProjectOut(ORMModel):
     slug: str
     description: str | None = None
     status: str
-    metadata_: dict[str, Any] = Field(default_factory=dict, alias="metadata")
+    # Read from the ORM attribute ``metadata_``; aliasing to "metadata" would
+    # resolve to SQLAlchemy's inherited Declarative MetaData object instead.
+    metadata_: dict[str, Any] = Field(default_factory=dict, serialization_alias="metadata")
     created_at: datetime
     updated_at: datetime
 
@@ -420,7 +422,10 @@ class GpuNodeOut(ORMModel):
     status: str
     endpoint: str | None = None
     last_seen_at: datetime | None = None
-    metadata_: dict[str, Any] = Field(default_factory=dict, alias="metadata")
+    # The ORM attribute is ``metadata_`` (it is aliased to the "metadata"
+    # column name). Reading it as ``metadata`` would resolve to SQLAlchemy's
+    # inherited Declarative MetaData object and fail dict validation.
+    metadata_: dict[str, Any] = Field(default_factory=dict, serialization_alias="metadata")
 
 
 class GpuDeviceOut(ORMModel):
