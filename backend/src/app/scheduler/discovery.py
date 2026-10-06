@@ -109,6 +109,7 @@ class DiscoveryService:
                         index=info.index,
                         name=info.name,
                         backend_device_id=info.device_id,
+                        backend=self._backend.name,
                         vram_total_mb=info.vram_total_mb,
                         vram_free_mb=info.vram_free_mb,
                         compute_capability=info.compute_capability,

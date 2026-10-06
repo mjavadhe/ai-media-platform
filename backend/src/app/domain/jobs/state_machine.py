@@ -34,7 +34,13 @@ LEGAL_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.QUEUED: frozenset({JobStatus.RESERVED, JobStatus.CANCELLED, JobStatus.QUEUED}),
     JobStatus.RESERVED: frozenset({JobStatus.STARTING, JobStatus.CANCELLED, JobStatus.QUEUED}),
     JobStatus.STARTING: frozenset(
-        {JobStatus.RUNNING, JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.QUEUED}
+        {
+            JobStatus.RUNNING,
+            JobStatus.FAILED,
+            JobStatus.RETRYING,
+            JobStatus.CANCELLED,
+            JobStatus.QUEUED,
+        }
     ),
     JobStatus.RUNNING: frozenset(
         {
@@ -76,6 +82,11 @@ TRANSITION_OWNERS: dict[tuple[JobStatus, JobStatus], frozenset[JobOwner]] = {
     (JobStatus.STARTING, JobStatus.FAILED): frozenset({JobOwner.ORCHESTRATOR, JobOwner.SCHEDULER}),
     (JobStatus.RUNNING, JobStatus.FAILED): frozenset({JobOwner.ORCHESTRATOR, JobOwner.SCHEDULER}),
     (JobStatus.RUNNING, JobStatus.RETRYING): frozenset({JobOwner.ORCHESTRATOR, JobOwner.SCHEDULER}),
+    # A worker can fail a job the moment it claims it, before the first progress
+    # report, so STARTING must be able to retry for the same reason RUNNING can.
+    (JobStatus.STARTING, JobStatus.RETRYING): frozenset(
+        {JobOwner.ORCHESTRATOR, JobOwner.SCHEDULER}
+    ),
     (JobStatus.RUNNING, JobStatus.COMPLETED): frozenset({JobOwner.ORCHESTRATOR}),
     (JobStatus.RUNNING, JobStatus.PAUSED): frozenset({JobOwner.ORCHESTRATOR}),
     (JobStatus.QUEUED, JobStatus.CANCELLED): frozenset({JobOwner.ORCHESTRATOR}),

@@ -238,6 +238,20 @@ class OrchestratorService:
                 ),
                 reason="worker asserted retryability" if retryable else "worker asserted fatal",
             )
+        # The retry budget is server policy. A worker reporting its failure as
+        # retryable must not be able to extend the budget: otherwise a buggy or
+        # malicious agent can keep a job alive forever by always saying
+        # "retryable". Re-checked here so the hint above can still *shorten* the
+        # budget (retryable=False) but never lengthen it.
+        if decision.should_retry and decision.retry_count >= decision.max_retries:
+            decision = RetryDecision(
+                False,
+                decision.failure_class,
+                decision.attempt_no,
+                decision.retry_count,
+                decision.max_retries,
+                reason=f"retry budget exhausted ({decision.max_retries} retries)",
+            )
 
         release_requested = await self._request_release(job)
         if decision.should_retry:

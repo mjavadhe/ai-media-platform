@@ -319,8 +319,19 @@ class ClaimOut(BaseModel):
     lease_expires_at: datetime
     lease_ttl_seconds: int
     heartbeat_interval_seconds: int
-    gpu_device_id: uuid.UUID
+    gpu_device_id: uuid.UUID = Field(description="Internal device row id, for traceability.")
+    gpu_backend_device_id: str = Field(
+        description=(
+            "Opaque backend handle the worker passes to its GPU backend "
+            "(e.g. 'mock-node-0-gpu-0'). Never a database id."
+        )
+    )
     node_id: uuid.UUID
+    node_key: str | None = None
+    backend: str | None = Field(default=None, description="Backend that owns the device.")
+    required_vram_mb: int | None = Field(
+        default=None, description="Reservation size, so the worker can fail fast on OOM."
+    )
     job_type: str
     params: dict[str, Any] = Field(default_factory=dict)
     prompt: str | None = None

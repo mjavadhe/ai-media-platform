@@ -362,11 +362,18 @@ class JobRepository:
     async def mark_unreservable(self, job: Job, *, reason: str) -> Job:
         """Put a claimed-but-unplaceable job back on the queue (Scheduler)."""
         current = JobStatus(job.status)
-        JobStateMachine.validate(current, JobStatus.QUEUED, JobOwner.SCHEDULER)
-        job.status = JobStatus.QUEUED.value
+        # A job pulled from the queue is already QUEUED; there is no edge to
+        # validate and no state to change, only the event to record.
+        if current is not JobStatus.QUEUED:
+            JobStateMachine.validate(current, JobStatus.QUEUED, JobOwner.SCHEDULER)
+            job.status = JobStatus.QUEUED.value
         job.dequeued_at = None
         job.dequeued_by = None
         job.visible_at = utcnow()
+        # Deliberately no job.error: the job is still QUEUED and will be
+        # retried, so marking it as failed would misrepresent it. The reason
+        # lives in the durable event timeline, which is what the job detail
+        # view and SSE replay read.
         await self._session.flush()
         await append_job_event(
             self._session, job, event_type="job.unreservable", payload={"reason": reason}
@@ -685,7 +692,12 @@ class JobRepository:
         transaction, so no separate reconciliation is required for this case.
         """
         current = JobStatus(job.status)
-        JobStateMachine.validate(current, JobStatus.QUEUED, JobOwner.SCHEDULER)
+        # A job that is already QUEUED has no state to change; recovery still
+        # records the failure reason and (optionally) consumes retry budget.
+        # Validating a QUEUED -> QUEUED self-transition would need an owner rule
+        # for an edge that carries no meaning, so it is handled explicitly here.
+        if current is not JobStatus.QUEUED:
+            JobStateMachine.validate(current, JobStatus.QUEUED, JobOwner.SCHEDULER)
         now = utcnow()
         job.status = JobStatus.QUEUED.value
         job.worker_id = None

@@ -299,9 +299,22 @@ class SchedulerService:
             capabilities=capabilities,
         )
         device = await self._gpu.get_device(reservation.gpu_device_id, lock=True)
-        if device is not None:
-            # Scheduler is the only writer of gpu_devices.status: RESERVED -> BUSY.
-            device.status = GpuStatus.BUSY.value
+        node = await self._node(reservation.node_id)
+        if device is None:  # pragma: no cover - reservation FK guarantees a row
+            raise StartConflictError("reserved device vanished at start time")
+        if not device.backend_device_id:
+            # Without a backend handle the worker cannot address the GPU, so this
+            # is a placement bug (incomplete discovery), not a work problem.
+            await self._jobs.requeue_for_recovery(
+                target,
+                attempt=None,
+                reason="reserved device has no backend device handle",
+                failure_class=FailureClass.INFRASTRUCTURE.value,
+                increment_retry=False,
+            )
+            raise StartConflictError("reserved device has no backend device handle")
+        # Scheduler is the only writer of gpu_devices.status: RESERVED -> BUSY.
+        device.status = GpuStatus.BUSY.value
         reservation.state = ReservationState.BUSY.value
         await self._session.flush()
 
@@ -323,6 +336,12 @@ class SchedulerService:
             "lease_ttl_seconds": self._settings.lease_ttl_seconds,
             "heartbeat_interval_seconds": self._settings.heartbeat_interval_seconds,
             "gpu_device_id": str(reservation.gpu_device_id),
+            #: Opaque, backend-specific handle the worker passes straight to its
+            #: GPU backend (e.g. "mock-node-0-gpu-0", a CUDA UUID). Not a DB id.
+            "gpu_backend_device_id": device.backend_device_id,
+            "node_key": node.node_key,
+            "required_vram_mb": target.required_vram_mb,
+            "backend": device.backend,
             "node_id": str(reservation.node_id),
             "job_type": target.job_type,
             "params": dict(target.params or {}),

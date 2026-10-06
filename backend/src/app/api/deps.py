@@ -14,7 +14,7 @@ from typing import Annotated
 from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.infrastructure.config import Settings, get_settings
+from app.infrastructure.config import Settings
 from app.infrastructure.security import constant_time_equals
 from app.persistence.database import get_db
 from app.persistence.models_identity import Worker
@@ -32,7 +32,20 @@ from app.services.storage.base import StorageBackend
 from worker.gpu.registry import build_gpu_backend
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
-AppSettings = Annotated[Settings, Depends(get_settings)]
+
+
+async def get_app_settings(request: Request) -> Settings:
+    """The settings this app instance was built with.
+
+    Not ``get_settings()``: that reads the process environment, which ignores the
+    ``create_app(settings=...)`` override and any per-test configuration. A
+    dependency on the app's own state keeps one process able to serve several
+    configurations.
+    """
+    return request.app.state.settings
+
+
+AppSettings = Annotated[Settings, Depends(get_app_settings)]
 
 _registry: ModelRegistry = get_registry()
 _storage: StorageBackend | None = None
@@ -157,12 +170,15 @@ async def get_current_worker(
     authorization: Annotated[str | None, Header()] = None,
 ) -> Worker:
     """Authenticate a worker agent via ``Authorization: Worker <credential>``."""
-    if not authorization or not authorization.lower().startswith("worker "):
+    scheme, _, credential = (authorization or "").partition(" ")
+    if scheme.lower() != "worker" or not credential.strip():
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="worker credential required (Authorization: Worker <credential>)",
         )
-    credential = authorization[8:].strip()
+    # partition(), not [8:]: the scheme length is easy to get wrong and a
+    # silently truncated credential fails as "invalid credential" much later.
+    credential = credential.strip()
     try:
         return await WorkerRepository(session).authenticate(credential)
     except WorkerAuthError as exc:

@@ -116,6 +116,7 @@ class GpuRepository:
         index: int,
         name: str,
         backend_device_id: str | None = None,
+        backend: str = "unknown",
         vram_total_mb: int,
         vram_free_mb: int,
         compute_capability: str | None = None,
@@ -140,12 +141,14 @@ class GpuRepository:
                 uuid=device_uuid,
                 index=index,
                 name=name,
+                backend=backend,
                 vram_total_mb=vram_total_mb,
                 vram_free_mb=vram_free_mb,
                 status=GpuStatus.AVAILABLE.value,
             )
             self._session.add(device)
         device.name = name
+        device.backend = backend
         if backend_device_id:
             device.backend_device_id = backend_device_id
         device.vram_total_mb = vram_total_mb
@@ -182,11 +185,11 @@ class GpuRepository:
         """Upsert a data-driven capability record (registry + probes)."""
         row = await self._session.scalar(
             select(GpuCapability)
-            .where(GpuCapability.device_id == device_id, GpuCapability.capability == capability)
+            .where(GpuCapability.gpu_device_id == device_id, GpuCapability.capability == capability)
             .with_for_update()
         )
         if row is None:
-            row = GpuCapability(device_id=device_id, capability=capability)
+            row = GpuCapability(gpu_device_id=device_id, capability=capability)
             self._session.add(row)
         row.supported = supported
         row.source = source
@@ -331,7 +334,7 @@ class GpuRepository:
             return True
         rows = await self._session.execute(
             select(GpuCapability.capability, GpuCapability.supported).where(
-                GpuCapability.device_id == device_id
+                GpuCapability.gpu_device_id == device_id
             )
         )
         known = dict(rows.all())
@@ -340,7 +343,7 @@ class GpuRepository:
     async def _capability_map(self, device_id: uuid.UUID) -> dict[str, Any]:
         rows = await self._session.execute(
             select(GpuCapability.capability, GpuCapability.supported, GpuCapability.value).where(
-                GpuCapability.device_id == device_id
+                GpuCapability.gpu_device_id == device_id
             )
         )
         return {
@@ -549,7 +552,7 @@ class GpuRepository:
         if capability:
             stmt = stmt.where(
                 GpuDevice.id.in_(
-                    select(GpuCapability.device_id).where(GpuCapability.name == capability)
+                    select(GpuCapability.gpu_device_id).where(GpuCapability.name == capability)
                 )
             )
         total = await self._session.scalar(select(func.count()).select_from(stmt.subquery()))

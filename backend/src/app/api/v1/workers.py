@@ -297,6 +297,8 @@ async def claim_job(
         lease_ttl_seconds=started["lease_ttl_seconds"],
         heartbeat_interval_seconds=started["heartbeat_interval_seconds"],
         gpu_device_id=uuid.UUID(started["gpu_device_id"]),
+        gpu_backend_device_id=started["gpu_backend_device_id"],
+        required_vram_mb=started.get("required_vram_mb"),
         node_id=uuid.UUID(started["node_id"]),
         job_type=started["job_type"],
         params=started["params"],

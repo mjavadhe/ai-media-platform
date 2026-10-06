@@ -51,7 +51,7 @@ metadata, checksums and pointers.
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings: Settings = app.state.settings
-    configure_logging(settings)
+    configure_logging()
     if not await ping_database():
         raise RuntimeError(
             "database is unreachable; refusing to start (run migrations first)"
@@ -157,7 +157,7 @@ def build() -> FastAPI:  # pragma: no cover - uvicorn factory entry
 
 async def _serve() -> None:  # pragma: no cover - process entry point
     settings = get_settings()
-    configure_logging(settings)
+    configure_logging()
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     import uvicorn
 

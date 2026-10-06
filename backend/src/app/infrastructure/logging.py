@@ -71,7 +71,10 @@ def configure_logging() -> None:
     structlog.configure(
         processors=[*shared, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        # stdlib factory, not PrintLoggerFactory: it integrates with the
+        # basicConfig handlers/levels above, and it is the only factory that
+        # supports the stdlib processors (add_logger_name, BoundLogger.level).
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 

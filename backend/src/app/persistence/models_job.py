@@ -49,19 +49,36 @@ class GpuNode(Base, TimestampMixin):
     __tablename__ = "gpu_nodes"
 
     id = uuid_pk()
-    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    #: Stable identity of the node *as the backend sees it* (Mock: "mock-node-0",
+    #: NVML: hostname). Discovery and worker registration both key off this, so a
+    #: display-name change cannot create a duplicate node.
+    node_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
     hostname: Mapped[str | None] = mapped_column(String(128))
+    #: Where the backend for this node can be reached, if it is remote.
+    endpoint: Mapped[str | None] = mapped_column(String(256))
     status: Mapped[str] = mapped_column(
         String(16), default=NodeStatus.HEALTHY.value, nullable=False
     )
     labels: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    #: ``metadata`` is reserved on declarative classes, hence the trailing underscore.
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, default=dict, nullable=False
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     devices: Mapped[list[GpuDevice]] = relationship(
         back_populates="node", cascade="all, delete-orphan"
     )
 
-    __table_args__ = (Index("ix_gpu_nodes_status", "status"),)
+    __table_args__ = (
+        Index("uq_gpu_nodes_node_key", "node_key", unique=True),
+        Index("ix_gpu_nodes_status", "status"),
+        CheckConstraint(
+            "status IN ('HEALTHY', 'DEGRADED', 'OFFLINE')", name="ck_gpu_nodes_status"
+        ),
+    )
 
 
 class GpuDevice(Base, TimestampMixin):
@@ -84,6 +101,13 @@ class GpuDevice(Base, TimestampMixin):
         String(16), default=GpuStatus.AVAILABLE.value, nullable=False
     )
     health: Mapped[str] = mapped_column(String(16), default="OK", nullable=False)
+    #: Backend that reported this device ("mock", "nvml"). Stored per device so
+    #: placement, the claim payload and the UI never have to infer it.
+    backend: Mapped[str] = mapped_column(String(32), default="mock", nullable=False)
+    #: Why the device is unhealthy (probe failure, driver error, …).
+    error_message: Mapped[str | None] = mapped_column(String(512))
+    #: Last successful backend poll; drives the offline-detection sweep.
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     vram_total_mb: Mapped[int] = mapped_column(Integer, nullable=False)
     vram_free_mb: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -112,6 +136,7 @@ class GpuDevice(Base, TimestampMixin):
         Index("ix_gpu_devices_status", "status"),
         Index("ix_gpu_devices_node_id", "node_id"),
         Index("ix_gpu_devices_reservation_id", "reservation_id"),
+        Index("ix_gpu_devices_last_seen_at", "last_seen_at"),
     )
 
 
@@ -125,11 +150,15 @@ class GpuCapability(Base, TimestampMixin):
         PgUUID(as_uuid=True), ForeignKey("gpu_devices.id", ondelete="CASCADE"), nullable=False
     )
     capability: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Registry entries can assert a capability as false without a probe failing.
+    supported: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     value: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    #: Human-readable probe output, kept for diagnostics and for the capability UI.
+    message: Mapped[str | None] = mapped_column(String(512))
     source: Mapped[str] = mapped_column(
         String(16), default=CapabilitySource.REGISTRY.value, nullable=False
     )
-    probed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     device: Mapped[GpuDevice] = relationship(back_populates="capabilities")
 

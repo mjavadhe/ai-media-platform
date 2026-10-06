@@ -126,7 +126,6 @@ class MediaService:
                 key=stored.key,
                 size_bytes=stored.size_bytes,
                 checksum=stored.checksum,
-                content_type=stored.content_type,
                 owner_type=StorageOwnerType.JOB.value,
                 owner_id=job.id,
                 mime_type=stored.content_type,
@@ -168,23 +167,36 @@ class MediaService:
         key: str,
         size_bytes: int,
         checksum: str,
-        content_type: str,
         owner_type: str,
         owner_id: uuid.UUID,
         mime_type: str,
     ) -> StorageObject:
-        existing = await self._session.scalar(select(StorageObject).where(StorageObject.key == key))
+        """Write the *metadata* row for an object that is already in storage.
+
+        The identity is (backend, bucket, key): the same key can exist in two
+        backends, so looking the row up by key alone would be wrong as soon as a
+        second backend is configured.
+        """
+        existing = await self._session.scalar(
+            select(StorageObject).where(
+                StorageObject.backend == self._storage.name,
+                StorageObject.bucket == self._storage.bucket,
+                StorageObject.key == key,
+            )
+        )
         if existing is not None:
             return existing
         row = StorageObject(
+            backend=self._storage.name,
+            bucket=self._storage.bucket,
             key=key,
             size_bytes=size_bytes,
             checksum=checksum,
-            content_type=content_type,
             mime_type=mime_type,
             owner_type=owner_type,
-            owner_id=owner_id,
-            status="AVAILABLE",
+            # The column is a string on purpose: owners are polymorphic
+            # (JOB, PROJECT, SHOT), so a UUID column would be the wrong type.
+            owner_id=str(owner_id),
         )
         self._session.add(row)
         await self._session.flush()
@@ -275,7 +287,6 @@ class MediaService:
             key=str(output["url"]),
             size_bytes=int(output.get("size_bytes") or 0),
             checksum=str(output.get("checksum") or "remote"),
-            content_type=str(output.get("mime_type") or "application/octet-stream"),
             owner_type=StorageOwnerType.JOB.value,
             owner_id=job.id,
             mime_type=str(output.get("mime_type") or "application/octet-stream"),
